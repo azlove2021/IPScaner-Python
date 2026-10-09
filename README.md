@@ -70,8 +70,16 @@
 
 ### 方式一：直接使用（推荐）
 
-1. 到 [**Releases**](https://github.com/azlove2021/IPScaner-Python/releases) 下载 `IPScaner_单文件_v1.26.0.exe`
+1. 到 [**Releases**](https://github.com/azlove2021/IPScaner-Python/releases) 下载 `IPScaner_v1.26.0_portable_win64.exe`
 2. 双击运行 —— 单文件绿色版，无需安装、无需 Python 环境
+
+> 也可以直接点这个链接：
+> <https://github.com/azlove2021/IPScaner-Python/releases/latest/download/IPScaner_v1.26.0_portable_win64.exe>
+>
+> 下载后可对照同目录的 `SHA256SUMS.txt` 校验：
+> `4f1d1101966c53021d532d522ffdd58a576be10e6219281177b8d28a71aee2ed`
+>
+> （注：GitHub Releases 会把资产名里的非 ASCII 字符替换成 `.`，所以发布包用的是英文名。）
 
 ### 方式二：从源码运行
 
