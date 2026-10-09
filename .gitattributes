@@ -1,0 +1,18 @@
+# 源码统一 LF（修复层对换行敏感：gen_hook.py 会把 CRLF 归一化后再算指纹）
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.spec text eol=lf
+
+# .ps1 必须保持原样（PowerShell 5.1 按 ANSI 读无 BOM 的 UTF-8，改换行会导致静默失效）
+*.ps1  -text
+
+# 二进制
+*.png  binary
+*.ico  binary
+*.exe  binary
+*.xlsx binary
+
+# 精简 diff 展示
+*.png  -diff
+*.ico  -diff

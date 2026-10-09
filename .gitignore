@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.manifest
+*.spec.bak
+
+# 运行期产物
+*.log
+*.tmp
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+~$*
+
+# 本地产物（别提交 exe，走 Releases）
+IPScaner.exe
+IPScaner_单文件_*.exe
+_out_export_*.xlsx
+
+# 生成物：运行期钩子由 gen_hook.py 从 ui_fix.py 生成，不入库
+rthook_ipscaner_uifix.py
+build_green/
+
+# 网盘 / 同步盘临时文件
+*.baiduyun.uploading.cfg
+*.workbuddy/
