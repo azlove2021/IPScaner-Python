@@ -208,6 +208,7 @@ build_green/dist/IPScaner.exe     ← 单文件成品
 ```
 IPScaner-Python/
 ├── README.md
+├── LICENSE / NOTICE.md     # MIT 许可 + 上游作品与合规说明
 ├── src/                    # 复刻源码（界面层 + 业务层）
 │   ├── gui.py              #   入口：命令行参数 / DPI 感知 / 初始化
 │   ├── mainform.py         #   主窗体：单 Canvas 手绘整个客户区
@@ -222,9 +223,12 @@ IPScaner-Python/
 │   ├── ui_fix.py           #   ★ 全部修复 + 新功能都在这里
 │   ├── gen_hook.py         #   把 ui_fix.py 编译成 PyInstaller 运行时钩子
 │   └── green_onefile.spec  #   单文件打包 spec
-├── screenshots/            # 界面截图
-└── docs/                   # 逆向分析报告 / 验收报告
+├── screenshots/            # 12 张界面截图（README 引用）
+└── docs/                   # 逆向分析报告 / UI 审计 / 开发计划 / 验收报告
 ```
+
+> `build_green/`（构建工作区）**不在仓库里** —— 它包含从绿色版原程序提取的业务模块
+> 字节码，属于原版产物。首次构建时按上一节的说明自行拼装即可。
 
 ---
 
@@ -311,11 +315,13 @@ IPScaner-Python/
 - 请**仅对你自己拥有或已获得授权扫描**的网络使用本工具
 - 未经授权对他人网络进行端口扫描 / 主机探测可能**违反法律法规**
 - 使用本工具产生的任何后果由使用者自行承担
+- 本工具**不联网、不上报数据**，扫描结果与备注仅保存在本机
 
 原版程序版权归其原作者所有。本仓库只包含复刻代码与运行期修复层，不含原版二进制。
+详见 [NOTICE.md](NOTICE.md)。
 
 ---
 
 ## 📜 许可
 
-复刻代码以 MIT 协议开源，详见 [LICENSE](LICENSE)。
+复刻代码与运行期修复层以 **MIT** 协议开源，详见 [LICENSE](LICENSE)。

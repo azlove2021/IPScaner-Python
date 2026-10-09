@@ -19,16 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE ON UPSTREAM WORK
-
-This repository contains a Python (Tkinter) re-implementation of a LAN IP
-scanning utility, plus a runtime patch layer. The original program and its
-intellectual property belong to its respective author(s). No original
-binary is redistributed here.
-
-Users are solely responsible for complying with all applicable laws when
-using this tool. Only scan networks you own or are explicitly authorized
-to test.
