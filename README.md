@@ -1,6 +1,6 @@
 # IPScaner · 局域网 IP 扫描工具（Python 复刻版）
 
-> **单文件绿色版** · 免安装 · Python 3.10 + Tkinter 复刻 · 当前版本 **v1.26.0**
+> **单文件绿色版** · 免安装 · Python 3.10 + Tkinter 复刻 · 当前版本 **v1.27.0**
 >
 > 双击即用，不写注册表、不依赖运行库、不需要装 Python。
 
@@ -38,8 +38,31 @@
 ### windows 命令（19 项系统工具快捷入口）
 控制面板 · 卸载程序 · 区域语言 · 日期和时间 · 网络连接 · 防火墙 · Internet 属性 · 计算机管理 · 组策略 · 注册表 · 服务 · 系统属性 · **环境变量** · 用户账户 · 设备管理 · 电源选项 · 设备和打印机 · 磁盘管理 · 我的命令（可自定义）
 
-### IP 色块右键菜单（14 项）
-复制 IP / 主机名 / MAC · 端口扫描 · 访问共享目录 · 浏览网页 · 调用 Ping / Tracert / Telnet / netstat / ARP · **备注信息**
+### IP 色块右键菜单（13 项）
+复制 IP / 主机名 / MAC · 端口扫描 · 访问共享目录 · 浏览网页 · 调用 Ping / Tracert / Telnet / netstat / ARP · **备注信息** · **导入IP表格**
+
+---
+
+## 🆕 v1.27.0 新增
+
+针对"**手上有张表，里面是不同网段的 IP，想直接 ping 一遍**"这个场景：
+
+### 1. 主界面工具栏「导入IP」
+- 主界面工具栏最右新增 **「导入IP」** 按钮
+- 点一下 → 选一个 **.xlsx / .csv / .txt** → 自动打开批量扫描窗、灌入 IP、**直接开始 ping**
+- 表格里混着不同网段也没关系（如 `192.168.5.65` / `10.20.30.40` / `172.16.8.9` 一起扫）
+- 重复 IP 自动去重、结果按 IP 排序
+
+### 2. IP 色块右键菜单也能导入
+- 右键任意 IP 色块 → 菜单末尾新增 **「导入IP表格(&I)」**
+- 与工具栏按钮走**同一条链路**；批量扫描窗已经开着就**直接复用**，不会重复弹窗
+
+### 3. 修掉一个真机才会暴露的坑
+- 「导入 IP 表格」弹出的是 Windows 的 **Vista 版文件对话框（DirectUI）**，
+  在部分机器上**收不到任何合成输入**（自动化测试工具点不动它）。
+  本项目改用 **UI Automation（COM）** 通道驱动，端到端验证全程真实跑通：
+  CSV → 去重 3 个目标 → 自动开扫 → 结果表 3 行 → 完成提示
+  「扫描完成，共 3 台主机，正常 0 台」。
 
 ---
 
@@ -70,14 +93,14 @@
 
 ### 方式一：直接使用（推荐）
 
-1. 到 [**Releases**](https://github.com/azlove2021/IPScaner-Python/releases) 下载 `IPScaner_v1.26.0_portable_win64.exe`
+1. 到 [**Releases**](https://github.com/azlove2021/IPScaner-Python/releases) 下载 `IPScaner_v1.27.0_portable_win64.exe`
 2. 双击运行 —— 单文件绿色版，无需安装、无需 Python 环境
 
 > 也可以直接点这个链接：
-> <https://github.com/azlove2021/IPScaner-Python/releases/latest/download/IPScaner_v1.26.0_portable_win64.exe>
+> <https://github.com/azlove2021/IPScaner-Python/releases/latest/download/IPScaner_v1.27.0_portable_win64.exe>
 >
 > 下载后可对照同目录的 `SHA256SUMS.txt` 校验：
-> `4f1d1101966c53021d532d522ffdd58a576be10e6219281177b8d28a71aee2ed`
+> `cd4c58974e2c88b3db442bdd781f0e52bf3cf6874d4d460c294228eb525e0d79`
 >
 > （注：GitHub Releases 会把资产名里的非 ASCII 字符替换成 `.`，所以发布包用的是英文名。）
 
@@ -92,6 +115,15 @@ python src/gui.py
 ---
 
 ## 📖 使用说明
+
+### 导入一个表格里的 IP（跨网段，v1.27.0）
+
+1. 点主界面工具栏最右的 **「导入IP」**（或右键任意 IP 色块 → **导入IP表格(&I)**）
+2. 选一个 `.xlsx` / `.csv` / `.txt` —— 里面的 IP **可以不在同一网段**
+3. 程序会自动打开批量扫描窗、灌入 IP 并 **直接开始 ping**；
+   重复 IP 自动去重、结果按 IP 排序，扫完弹出「扫描完成，共 N 台主机，正常 M 台」
+
+> 批量扫描窗已经开着的话会**直接复用**，不会重复弹窗。
 
 ### 给某个 IP 加备注
 
@@ -117,7 +149,25 @@ python src/gui.py
 
 ### 主界面
 
+工具栏最右是 v1.27.0 新增的 **「导入IP」**：
+
 ![主界面](screenshots/01_main.png)
+
+### 主界面「导入IP」→ 跨网段自动开扫（v1.27.0）
+
+点「导入IP」选中表格后，自动灌 IP 并开扫，结果直接回填结果表：
+
+![导入后自动开扫](screenshots/15_import_by_main_btn.png)
+
+扫完弹出完成提示：
+
+![扫描完成提示](screenshots/16_scan_done.png)
+
+### 右键菜单 → 「导入IP表格」（v1.27.0）
+
+右键任意 IP 色块，菜单**末尾**就是新入口：
+
+![右键菜单导入项](screenshots/14_ctx_menu_import.png)
 
 ### 快捷工具菜单
 

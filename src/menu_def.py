@@ -106,6 +106,8 @@ CONTEXT_MENU = {
         ("调用ARP(&A)", None, "carp", None),
         SEP,
         ("备注信息(&M)", None, "cmemo", None),
+        SEP,                                   # [ADD 需求37] 共 13 项 + 3 条分隔线
+        ("导入IP表格(&I)", None, "cimport", None),
     ],
 }
 

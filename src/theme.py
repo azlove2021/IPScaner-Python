@@ -120,6 +120,11 @@ BTN_NG = (359, 42, 56, 22)         # [SRC] 不通
 BTN_OK = (420, 42, 56, 22)         # [SRC] 正常
 BTN_DETAIL = (480, 42, 79, 23)     # [SRC] Location(480,18) Size(79,23)
 BTN_EXPORT = (563, 42, 56, 23)     # [SRC] Location(563,18) Size(56,23)
+# [ADD 需求37] 主界面工具栏「导入IP」——原版没有这个按钮，是本项目新增的入口：
+# 选一个 Excel/CSV → 批量扫描窗（复用已开着的那个）→ 灌 IP → 直接开 ping。
+# 放在「导出」右侧：652 = LBL_STAT 右沿 646 + 6 间距，730 距离客户区右沿还有 105。
+BTN_IMPORT = (652, 42, 78, 23)
+BTN_IMPORT_TEXT = "导入IP"
 LBL_STAT = (623, 47)               # [SRC] Location(623,23) AutoSize 23x12
 LBL_LEGEND_TEXT = "图例："          # [SRC] label1.Text
 LBL_STAT_TEXT = "---"              # [SRC] lblStat.Text

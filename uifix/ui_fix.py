@@ -3447,7 +3447,7 @@ def patch_main_resize(root=None, log=None):
 # 运行期改常量。时机很关键：mainform 建窗时执行
 #   root.title(T.TITLE_TEXT + T.TITLE_VER)
 # 所以要在**第一次 title() 之前**改掉 theme.TITLE_VER。
-BUILD_VERSION = "1.26.0"          # 本修复层对应的交付版本
+BUILD_VERSION = "1.27.0"          # 本修复层对应的交付版本
 
 
 def set_version(log=None, ver=None):
@@ -4294,6 +4294,27 @@ def make_memo_edit(dialogs, log=None):
 IMPORT_BTN_BOX = (170, 477, 96, 26)     # 设计像素：底部「定时扫描」条左侧的空白处
 IMPORT_HINT_BOX = (280, 481, 160, 16)
 
+# ---- 需求37：主界面「导入IP」入口 --------------------------------------------------
+# 工具栏那一行最右端是空白的：BTN_EXPORT 到 x=619，LBL_STAT「---」占 623..646，
+# 再往右到 CLIENT_W(835) 全空。所以按钮放 652 起、宽 78，与既有按钮同一条 y=42。
+MAIN_IMPORT_BTN = (652, 42, 78, 23)     # 设计像素 (x, y, w, h)
+MAIN_IMPORT_TEXT = "导入IP"             # 按钮文案，同时也是 fire() 的动作后缀
+MAIN_IMPORT_MENU_TEXT = "导入IP表格(&I)"  # 右键菜单里的那一项
+MAIN_IMPORT_ACT = "cimport"             # 右键菜单动作名
+
+# 批量扫描窗的当前实例（由 patch_ipsegment 记录）。
+# 用途：主界面「导入IP」要先把目标灌进那个窗，已经开着就得复用，
+# 不能每次调用 f_ipsegment 都新开一个 —— 用户会看到两个一样的窗口。
+_IPSEC_TOP = []
+
+IPS_EMPTY_HINT = (
+    "这个文件里没找到 IP 地址。\n\n"
+    "支持在任意单元格/行里直接写：\n"
+    "  · 单个 IP      192.168.1.10\n"
+    "  · 整个网段     192.168.1.0/24   或   192.168.1\n"
+    "  · 连续范围     192.168.1.1-192.168.1.50\n"
+    "可以混着写，也可以跨网段（会去重 + 按 IP 排序）。")
+
 
 def _find_child(top, cls=None, text=None):
     for c in top.winfo_children():
@@ -4306,6 +4327,35 @@ def _find_child(top, cls=None, text=None):
         except Exception:  # noqa: BLE001
             continue
     return None
+
+
+def _read_ips_into(seg, path, log=None, title="导入 IP 表格"):
+    """读表格 → 抽取 IP → 写进批量窗的输入框。返回 (条数, 说明)。
+
+    抽出来是因为有**两个入口**要走同一条路：批量窗底栏的「导入表格」，
+    和主界面工具栏的「导入IP」（需求37）。两者差别只在事后说什么话/要不要自动开扫。
+    """
+    from tkinter import messagebox
+
+    try:
+        ips, note = read_ip_file(path, log=log)
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("导入表格：read_ip_file 抛异常 %r" % (e,))
+        messagebox.showwarning(title, "读取失败：\n%r" % (e,))
+        return 0, ""
+    if not ips:
+        messagebox.showwarning(title, IPS_EMPTY_HINT)
+        return 0, note
+    try:
+        seg.delete("1.0", "end")
+        seg.insert("1.0", "\n".join(ips) + "\n")
+    except Exception as e:  # noqa: BLE001
+        messagebox.showwarning(title, "写入输入框失败：%r" % (e,))
+        return 0, note
+    if log is not None:
+        log("导入表格 %s → %d 个目标（%s）" % (path, len(ips), note))
+    return len(ips), note
 
 
 def _import_table(top, seg, dialogs, log=None):
@@ -4333,36 +4383,104 @@ def _import_table(top, seg, dialogs, log=None):
         if log is not None:
             log("需求36 导入表格：用户取消（返回空路径）")
         return
+    n, _note = _read_ips_into(seg, p, log=log, title=title)
+    if n:
+        messagebox.showinfo(title, "已导入 %d 个 IP 目标（已去重排序）。\n\n"
+                                   "点【开始扫描】就开始 ping 测试。" % n)
+
+
+def _get_ipsec_window(main, dialogs, log=None):
+    """拿到批量扫描窗：已开着就复用，否则新建。"""
+    top = _IPSEC_TOP[0] if _IPSEC_TOP else None
+    if top is not None:
+        try:
+            if top.winfo_exists():
+                return top
+        except Exception:  # noqa: BLE001
+            pass
     try:
-        ips, note = read_ip_file(p, log=log)
-        if log is not None:
-            log("需求36 导入表格：read_ip_file 返回 %d 个 IP（%s）"
-                % (len(ips), note))
+        return dialogs.f_ipsegment(main)
     except Exception as e:  # noqa: BLE001
         if log is not None:
-            log("需求36 导入表格：read_ip_file 抛异常 %r" % (e,))
-        messagebox.showwarning(title, str(e))
-        return
-    if not ips:
-        messagebox.showwarning(
-            title,
-            "这个文件里没找到 IP 地址。\n\n"
-            "支持在任意单元格/行里直接写：\n"
-            "  · 单个 IP      192.168.1.10\n"
-            "  · 整个网段     192.168.1.0/24   或   192.168.1\n"
-            "  · 连续范围     192.168.1.1-192.168.1.50\n"
-            "可以混着写，也可以跨网段（会去重 + 按 IP 排序）。")
-        return
-    try:
-        seg.delete("1.0", "end")
-        seg.insert("1.0", "\n".join(ips) + "\n")
-    except Exception as e:  # noqa: BLE001
-        messagebox.showwarning(title, "写入输入框失败：%r" % (e,))
-        return
+            log("需求37 打开批量扫描窗失败 %r" % (e,))
+        return None
+
+
+def main_import_ips(main, log=None):
+    """需求37：主界面「导入IP」—— 选表格 → 批量窗灌入 → 自动开始 ping。
+
+    为什么要有它：用户的原话是「没有导入IP方便我ping测不同网段的ip」。
+    「导入表格」本来已经做了，但它藏在 快捷工具 → IP批量扫描 的底栏里，
+    主界面看不到入口。这个入口把整条链路缩成**主界面点一下**：
+    选文件 → 批量窗自己开出来 → IP 列表填好 → 直接开扫。
+    """
+    from tkinter import filedialog, messagebox
+
+    import dialogs
+
+    title = "导入 IP 表格"
     if log is not None:
-        log("需求36 导入表格 %s → %d 个目标（%s）" % (p, len(ips), note))
-    messagebox.showinfo(title, "已导入 %d 个 IP 目标（已去重排序）。\n\n"
-                               "点【开始扫描】就开始 ping 测试。" % len(ips))
+        log("需求37 主界面「导入IP」被点到了，准备弹 askopenfilename")
+    try:
+        p = filedialog.askopenfilename(
+            title=title,
+            filetypes=[("Excel / CSV / 文本", "*.xlsx *.xlsm *.csv *.txt"),
+                       ("Excel 工作簿", "*.xlsx"), ("CSV 逗号分隔", "*.csv"),
+                       ("文本文件", "*.txt"), ("全部文件", "*.*")])
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求37 askopenfilename 抛异常 %r" % (e,))
+        return 0
+    if not p:
+        if log is not None:
+            log("需求37 用户取消（返回空路径）")
+        return 0
+    if log is not None:
+        log("需求37 选中文件 %r" % (p,))
+
+    top = _get_ipsec_window(main, dialogs, log=log)
+    if top is None:
+        messagebox.showwarning(title, "打不开批量扫描窗口，导入已取消。")
+        return 0
+    seg = _find_child(top, cls="Text")
+    if seg is None:
+        messagebox.showwarning(title, "没找到批量扫描窗的 IP 输入框。")
+        return 0
+
+    n, _note = _read_ips_into(seg, p, log=log, title=title)
+    if not n:
+        return 0
+
+    # 把窗口推到用户眼前（批量窗是主窗的 transient，主窗若被别的窗口压着就看不见）
+    try:
+        top.deiconify()
+        top.lift()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        main.set_status("tip", "已导入 %d 个 IP，正在开始 ping 测试…" % n)
+    except Exception:  # noqa: BLE001
+        pass
+
+    started = False
+    try:
+        b = _find_child(top, cls="Button", text="开始扫描")
+        if b is not None and str(b.cget("state")) != "disabled":
+            b.invoke()                      # 真点那个按钮，走产品自己的扫描逻辑
+            started = True
+            if log is not None:
+                log("需求37 已自动触发「开始扫描」（%d 个目标）" % n)
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求37 自动开始扫描失败 %r" % (e,))
+    if not started:
+        # 自动开扫没成（按钮被禁用等）→ 至少把「接下来点哪儿」说清楚
+        if log is not None:
+            log("需求37 自动开扫未触发，退回提示用户手点")
+        messagebox.showinfo(title, "已导入 %d 个 IP 目标（已去重排序）。\n\n"
+                                   "点批量窗里的【开始扫描】就开始 ping 测试。" % n)
+    return n
+
 
 
 def export_table_xlsx(tv, log=None):
@@ -4715,6 +4833,94 @@ def decorate_ipsegment(main, top, dialogs, log=None):
     return 1
 
 
+def patch_main_import(mainform, log=None):
+    """需求37：主界面「导入IP」入口 —— 工具栏按钮 + IP色块右键菜单项。
+
+    三个补丁点（都不动产品字节码，只包一层）：
+      ① `MainForm._draw_toolbar_base`：画完原按钮再补画我们的按钮。
+         build_base() 每次都先 `cv.delete("base")` + `regions=[]`，所以这里
+         **天然幂等**，重复调用不会叠出多个按钮。
+      ② `MainForm.fire(act)`：工具栏点击走 `fire("btn:<文案>")`，
+         菜单点击走 `fire(<动作名>)` —— 两条路都汇到这一个方法，包它一处就够。
+      ③ `popup.MenuPopup.__init__`：右键菜单的构建点在产品的
+         `open_context_popup()` 里，`labels` 是**局部变量**，没法从外面改。
+         但所有菜单弹出层都要过 MenuPopup 的构造 —— 在这里按「有没有 cmemo 动作」
+         认出来是不是 IP 色块右键菜单，是就往末尾补一项。
+         ⚠️ `cmemo` 在 menu_def.CONTEXT_MENU 里也是同一条右键菜单，
+            而托盘菜单(TRAY_MENU)/5 个顶级菜单都不含它 → 判据唯一。
+
+    幂等：MainForm 上打标记，重复安装直接返回。
+    """
+    MF = getattr(mainform, "MainForm", None)
+    if MF is None or getattr(MF, "_ipscaner_req37_done", False):
+        return 0
+    MF._ipscaner_req37_done = True
+    done = 0
+
+    # ---- ① 工具栏按钮 ----
+    _orig_tb = MF._draw_toolbar_base
+
+    def _draw_toolbar_base(self):
+        _orig_tb(self)
+        try:
+            import theme as _T
+            ic = ("mnuIPSegment"
+                  if self.icons.get("mnuIPSegment") is not None else None)
+            self._draw_button(MAIN_IMPORT_BTN, MAIN_IMPORT_TEXT, _T.C_BTN_FACE,
+                              icon=ic, font=self.tk_f_default)
+        except Exception as e:  # noqa: BLE001
+            if log is not None:
+                log("需求37 主界面导入按钮绘制失败 %r" % (e,))
+
+    _draw_toolbar_base._ipscaner_req37 = True
+    MF._draw_toolbar_base = _draw_toolbar_base
+    done += 1
+
+    # ---- ② 动作分发 ----
+    _orig_fire = MF.fire
+
+    def fire(self, act):
+        if act == ("btn:" + MAIN_IMPORT_TEXT) or act == MAIN_IMPORT_ACT:
+            return main_import_ips(self, log=log)
+        return _orig_fire(self, act)
+
+    fire._ipscaner_req37 = True
+    MF.fire = fire
+    done += 1
+
+    # ---- ③ 右键菜单项 ----
+    try:
+        import menu_def as _md
+        import popup as _pp
+
+        _orig_mp_init = _pp.MenuPopup.__init__
+
+        def _mp_init(self, host, items, *a, **k):
+            try:
+                lvl = k.get("level", a[1] if len(a) > 1 else 0)
+                if not lvl and any(
+                        isinstance(it, tuple) and len(it) >= 3
+                        and it[2] == "cmemo" for it in items):
+                    items = list(items) + [
+                        _md.SEP,
+                        (MAIN_IMPORT_MENU_TEXT, None, MAIN_IMPORT_ACT, None)]
+            except Exception:  # noqa: BLE001
+                pass
+            return _orig_mp_init(self, host, items, *a, **k)
+
+        _mp_init._ipscaner_req37 = True
+        _pp.MenuPopup.__init__ = _mp_init
+        done += 1
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求37 右键菜单项安装失败 %r" % (e,))
+
+    if log is not None:
+        log("需求37 已加主界面「%s」按钮 %s + 右键菜单项「%s」（%d 处）"
+            % (MAIN_IMPORT_TEXT, MAIN_IMPORT_BTN, MAIN_IMPORT_MENU_TEXT, done))
+    return done
+
+
 def patch_ipsegment(dialogs, log=None):
     """包 dialogs.f_ipsegment：建完窗口再挂增强（不改它的扫描逻辑）。"""
     if getattr(dialogs, "_ipscaner_ipsec_done", False):
@@ -4723,6 +4929,12 @@ def patch_ipsegment(dialogs, log=None):
 
     def f_ipsegment(main, *a, **k):
         top = orig(main, *a, **k)
+        try:
+            if top is not None:
+                # 记下当前实例：主界面「导入IP」要复用它，不能再开一个窗
+                _IPSEC_TOP[:] = [top]
+        except Exception:  # noqa: BLE001
+            pass
         try:
             decorate_ipsegment(main, top, dialogs, log=log)
         except Exception as e:  # noqa: BLE001
@@ -4794,6 +5006,7 @@ def patch_req36(root=None, log=None):
     try:
         import mainform as _mf
         done += patch_main_memos(_mf.MainForm, log=log)
+        done += patch_main_import(_mf, log=log)
     except Exception as e:  # noqa: BLE001
         if log is not None:
             log("需求36 mainform 侧安装失败 %r" % (e,))

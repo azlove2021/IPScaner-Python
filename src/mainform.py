@@ -457,6 +457,10 @@ class MainForm:
                           font=self.tk_f_default)
         self._draw_button(T.BTN_EXPORT, "导出", T.C_BTN_FACE, icon="btnExport",
                           font=self.tk_f_default)
+        # [ADD 需求37] 「导入IP」：跨网段批量导入 + 自动开扫。
+        # 图标复用菜单里的 mnuIPSegment（同一件事：IP 段/批量扫描）。
+        self._draw_button(T.BTN_IMPORT, T.BTN_IMPORT_TEXT, T.C_BTN_FACE,
+                          icon="mnuIPSegment", font=self.tk_f_default)
 
     def _draw_textbox(self, tag, record=False):
         """IP 文本框：白底 + 四边深浅不同的固定 3D 边。
@@ -805,6 +809,8 @@ class MainForm:
             ("调用Tracert(&R)", "ctracert"), ("调用Telnet(&T)", "ctelnet"),
             ("调用netstat(&N)", "cnetstat"), ("调用ARP(&A)", "carp"),
             M.SEP, ("备注信息(&M)", "cmemo"),
+            # [ADD 需求37] 共 13 项 + 3 条分隔线
+            M.SEP, ("导入IP表格(&I)", "cimport"),
         ]
         items = [M.SEP if it is M.SEP else (it[0], None, it[1], None) for it in labels]
         self._draw_dropdown(sub=True, x=self.ctx_xy[0], y=self.ctx_xy[1],
@@ -1029,6 +1035,8 @@ class MainForm:
             ("调用Tracert(&R)", "ctracert"), ("调用Telnet(&T)", "ctelnet"),
             ("调用netstat(&N)", "cnetstat"), ("调用ARP(&A)", "carp"),
             M.SEP, ("备注信息(&M)", "cmemo"),
+            # [ADD 需求37] 共 13 项 + 3 条分隔线
+            M.SEP, ("导入IP表格(&I)", "cimport"),
         ]
         items = [M.SEP if it is M.SEP else (it[0], None, it[1], None) for it in labels]
         self.close_menus()
@@ -1166,6 +1174,8 @@ class MainForm:
                 show_list(self)
             elif name == "导出":
                 self.export()
+            elif name == T.BTN_IMPORT_TEXT:      # [ADD 需求37] 工具栏「导入IP」
+                self.import_ips()
             elif name in ("不通", "正常"):
                 self.copy_legend(name)
             return
@@ -1182,6 +1192,9 @@ class MainForm:
             elif key == "fetch":                 # statusFecthName_Click
                 self.set_status("host", T.STATUS_HOSTNAME_ON)
                 self.set_status("tip", "开始获取主机名")
+            return
+        if act == "cimport":                 # [ADD 需求37] 右键菜单「导入IP表格(&I)」
+            self.import_ips()
             return
         if act in ("localip", "ipsegment", "addresscalc", "portscan",
                    "processport", "wifi", "memomanager", "config", "about", "diyhelp"):
@@ -1363,6 +1376,78 @@ class MainForm:
                          self.memos.get(f"{self.ip_part}.{i}", "")])
         core.export_csv(p, rows, ["IP", "状态", "主机名", "MAC", "备注"])
         messagebox.showinfo(T.TITLE_TEXT, "导出成功")
+
+    # [ADD 需求37] 主界面工具栏「导入IP」
+    def import_ips(self):
+        """选一个表格/文本 → 批量扫描窗灌入 IP → 直接开 ping。
+
+        为什么要有它：原版的「导入表格」藏在 快捷工具 → IP批量扫描 的底栏里，
+        主界面看不到入口；而实际需求是「一堆**跨网段**的散 IP，批量 ping 一下」，
+        应该是主界面点一下就到。所以把它提到工具栏，收敛成一条链路：
+          选文件 → 批量窗（**复用**已开着的那个）→ IP 填好 → 自动开始扫描。
+        窗口复用很重要：反复导入不该堆出一串批量窗。
+
+        读表 / 抽 IP 的实现放在修复层（uifix.read_ip_file）：它做了 xlsx 的零依赖
+        解析 + 多种写法混抽（单 IP / 网段 / 连续范围 / 掩码位）+ 去重排序。
+        这里只负责「开窗、灌进去、替用户按一下开始扫描」。
+        """
+        from tkinter import filedialog, messagebox
+        import dialogs
+
+        p = filedialog.askopenfilename(
+            title="导入 IP 表格",
+            filetypes=[("Excel / CSV / 文本", "*.xlsx *.xlsm *.csv *.txt"),
+                       ("Excel 工作簿", "*.xlsx"), ("CSV 逗号分隔", "*.csv"),
+                       ("文本文件", "*.txt"), ("全部文件", "*.*")])
+        if not p:
+            return
+        top = getattr(self, "_ipsec_win", None)
+        try:
+            if top is None or not top.winfo_exists():
+                top = dialogs.f_ipsegment(self)
+                self._ipsec_win = top
+        except Exception:                        # noqa: BLE001
+            top = dialogs.f_ipsegment(self)
+            self._ipsec_win = top
+
+        def _find(parent, cls, text=None):
+            for w in parent.winfo_children():
+                if w.winfo_class() == cls:
+                    if text is None or str(w.cget("text")) == text:
+                        return w
+            return None
+
+        seg = _find(top, "Text")
+        if seg is None:
+            messagebox.showwarning(T.TITLE_TEXT, "没找到批量扫描窗的 IP 输入框。")
+            return
+        try:
+            import uifix
+            ips, _note = uifix.read_ip_file(p)
+        except Exception as e:                   # noqa: BLE001
+            messagebox.showwarning("导入 IP 表格", "读取失败：\n%r" % (e,))
+            return
+        if not ips:
+            messagebox.showwarning(
+                "导入 IP 表格",
+                "这个文件里没找到 IP 地址。\n\n支持在任意单元格/行里直接写：\n"
+                "  · 单个 IP      192.168.1.10\n"
+                "  · 整个网段     192.168.1.0/24   或   192.168.1\n"
+                "  · 连续范围     192.168.1.1-192.168.1.50\n"
+                "可以混着写，也可以跨网段（会去重 + 按 IP 排序）。")
+            return
+        seg.delete("1.0", "end")
+        seg.insert("1.0", "\n".join(ips) + "\n")
+        self.set_status("tip", "已导入 %d 个 IP，正在开始 ping 测试…" % len(ips))
+        top.deiconify()
+        top.lift()
+        b = _find(top, "Button", "开始扫描")
+        if b is not None and str(b.cget("state")) != "disabled":
+            b.invoke()                           # 走产品自己的扫描逻辑
+        else:
+            messagebox.showinfo("导入 IP 表格",
+                                "已导入 %d 个 IP 目标（已去重排序）。\n\n"
+                                "点批量窗里的【开始扫描】就开始 ping 测试。" % len(ips))
 
     def copy_legend(self, which):
         if self.stat_text == "---":
