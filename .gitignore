@@ -34,3 +34,6 @@ build_green/
 # 网盘 / 同步盘临时文件
 *.baiduyun.uploading.cfg
 *.workbuddy/
+
+# 本地备份（别提交）
+*.bak_*

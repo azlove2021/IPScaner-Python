@@ -34,6 +34,10 @@ Canvas 内容只有「标题框」5 条线 + 1 个标题字。等比缩放不改
 · 容错：任何单个控件失败都不影响整体，全部 try/except 包住。
 """
 
+# 模块级 import：本文件其余代码一律在函数内延迟 import（便于内联进运行期钩子），
+# 但 4.97 节的 ICMP 结构体是**模块级定义**，必须有全局的 ctypes。
+import ctypes  # noqa: E402
+
 DIALOG_FAMILY = "微软雅黑"
 DESIGN_PX = -12          # 原版设计字号（负值=像素）
 PX_STEP = (-1, -2, -3)   # 裁字时逐级回退的像素数（在目标字号上减）
@@ -1988,7 +1992,13 @@ def fix_memo_panel(win, S, log=None):
 _RESNAP_TAG = "ipscaner_resnap"
 BTN_BOXES = (("BTN_START", "开始"), ("BTN_STOP", "停止"), ("BTN_NG", "不通"),
              ("BTN_OK", "正常"), ("BTN_DETAIL", "列表展示"),
-             ("BTN_EXPORT", "导出"))
+             ("BTN_EXPORT", "导出"),
+             # 需求38：工具栏最右的「导入IP」也是**同一个 `_draw_button` 画的**，
+             # 所以它的面同样是 polygon、同样不走 ScaledCanvas 缩放。
+             # 漏在列表外的后果很隐蔽：面停在 1:1 的 (652,42)，而图标/文字是 xS ——
+             # 面又是 #FDFDFD 近白色，没有边框时在浅色底上等于隐形，
+             # 用户看到的就是「一个孤零零的图标 + 一行裸文字」（见用户截图）。
+             ("BTN_IMPORT", "导入IP"))
 MIN_CONTRAST = 4.5
 DARK_TEXT = "#000000"
 LIGHT_TEXT = "#FFFFFF"
@@ -3291,6 +3301,126 @@ def refit_main(app, log=None):
     return 1
 
 
+def _ws_enable_thickframe(root, log=None, quiet=False):
+    """在 Win32 层给主窗 HWND 加 WS_THICKFRAME | WS_MAXIMIZEBOX（幂等）。
+
+    ⭐ 2026-10-14 结论更新：这只是**兜底**。真正解决「窗口不能缩放」的是
+      `_install_resizable_redirect`（Plan C）。本函数在 Plan C 下必然走
+      「已是目标样式」早退分支（Tk 自己就把 WS_THICKFRAME 挂上了）。
+
+    为什么当初不走 `root.resizable(True, True)`：
+      exe 实测（2026-10-14，`_probe_resize_exe2.py`，主窗出现后零交互观察 20 s）
+        · 不装 install_main_resize          → 崩溃 0 / 4
+        · 装（默认）                        → 崩溃 ≈ 90%（22 轮里 20 崩）
+        · 只跳过 root.resizable(True, True) → 崩溃降到 1 / 5
+        · 只跳过 root.minsize(dw, dh)       → 4 / 5
+        · 只跳过 cv.pack_configure / 只跳过 <Configure> 绑定 → 不降
+      崩溃点固定在「主窗出现后 ~1.5 s」、**sweep 之外的空闲期**（sweep#1..#5
+      全部「进入+正常退出」都打过），事件日志 = `tcl86t.dll` + 0x80000003
+      （STATUS_BREAKPOINT，C 层主动 DebugBreak），不是 Python 异常。
+      → **真因已定位**：Tk 执行 `wm resizable` 会销毁并重建整个顶层 HWND
+        （`_probe_resizable_recreate.py`：GA_ROOT 每次换、旧句柄读回 style=0）。
+        事后在挂满控件的窗上重建 → 悬空引用 → Tcl_Panic。
+    所以本函数只改窗口**样式位**；而 Plan C 进一步把「改」提前到 UI 建出之前。
+    """
+    import ctypes as _ct
+    _u32 = _ct.windll.user32
+    _u32.GetAncestor.restype = _ct.c_void_p       # ⚠️ 默认 restype=c_int，x64 会截断句柄
+    _u32.GetAncestor.argtypes = [_ct.c_void_p, _ct.c_uint]
+    _u32.GetWindowLongPtrW.restype = _ct.c_ssize_t
+    _u32.GetWindowLongPtrW.argtypes = [_ct.c_void_p, _ct.c_int]
+    _u32.SetWindowLongPtrW.restype = _ct.c_ssize_t
+    _u32.SetWindowLongPtrW.argtypes = [_ct.c_void_p, _ct.c_int, _ct.c_ssize_t]
+    _u32.SetWindowPos.restype = _ct.c_int
+    _u32.SetWindowPos.argtypes = [_ct.c_void_p, _ct.c_void_p, _ct.c_int,
+                                  _ct.c_int, _ct.c_int, _ct.c_int, _ct.c_uint]
+    hwnd = _u32.GetAncestor(_ct.c_void_p(root.winfo_id()), 2) or root.winfo_id()
+    GWL_STYLE = -16
+    WS_THICKFRAME = 0x00040000
+    WS_MAXIMIZEBOX = 0x00010000
+    st = _u32.GetWindowLongPtrW(_ct.c_void_p(hwnd), GWL_STYLE)
+    new = st | WS_THICKFRAME | WS_MAXIMIZEBOX
+    if new == st:
+        # 已经是目标样式（幂等重申时走这里）—— 只在非 quiet 时报一句
+        if log is not None and not quiet:
+            log("窗口可缩放：HWND 样式已是 0x%08X（WS_THICKFRAME 在位）" % st)
+        return 1
+    _u32.SetWindowLongPtrW(_ct.c_void_p(hwnd), GWL_STYLE, new)
+    # SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER|SWP_FRAMECHANGED —— 让新样式立刻生效
+    _u32.SetWindowPos(_ct.c_void_p(hwnd), None, 0, 0, 0, 0,
+                      0x0001 | 0x0002 | 0x0004 | 0x0020)
+    if log is not None:
+        log("窗口可缩放：HWND 样式 0x%08X -> 0x%08X（加 WS_THICKFRAME|WS_MAXIMIZEBOX，"
+            "未改 Tk 的 wm resizable 状态）" % (st, new))
+    return 1
+
+
+def _install_resizable_redirect(root, log=None):
+    """Plan C：把产品 `MainForm.__init__` 里那句 `root.resizable(False, False)`
+    **改写成 (True, True)** —— 但是要在它执行的那一刻就拦截，而不是事后补。
+
+    —— 为什么必须「事前拦截」而不是「事后补一句 resizable(True,True)」——
+    2026-10-14 实测（`_probe_resizable_recreate.py`，源码态普通 Tk 窗）：
+    Tk 在 Windows 上执行 `wm resizable` 时会**销毁并重建整个顶层 HWND**：
+
+        基线（resizable 默认 1,1）      winfo_id=0x4B10D16  GA_ROOT=0x3571146
+        root.resizable(False, False) →  winfo_id=0x4B10D16  GA_ROOT=0xD60600 ← 换了
+        root.resizable(True, True)   →  winfo_id=0x4B10D16  GA_ROOT=0x3581146 ← 又换
+        root.resizable(True, True)   →  winfo_id=0x4B10D16  GA_ROOT=0xD70600 ← 又换
+
+    （`winfo_id()` 是 Tk 内部子窗，不变；`GetAncestor(...,GA_ROOT)` 那层带标题栏
+      的窗每次都是新句柄，且旧句柄 `GetWindowLongPtrW` 读回 0、`GetWindowRect`
+      读回 (0,0,0,0) = 已销毁。）
+
+    这就解释了「启动后零交互 ~1.5 s 崩 tcl86t.dll / 0x80000003」：
+      · 产品自己那句在第 133 行、**建 UI 之前**执行 → 那时窗上什么都没有，重建无害；
+      · 修复层原来却在 `MainForm.__init__` **返回之后**才调 `resizable(True, True)`
+        → 在已经挂满 ScaledCanvas / 工具条 / 命名字体的窗上做窗口重建
+        → Tk 内部（以及本层缓存的 HWND）留下悬空引用 → 空闲期撞出 Tcl_Panic
+        → abort() → STATUS_BREAKPOINT。
+      实测崩溃率：不装 install_main_resize 0/4；装了 ≈90%（22 轮 20 崩）；
+      只跳过 `root.resizable` 降到 1/5。
+
+    所以这里改成**换值**而不是**换时机**：把目标值直接改成 True，
+    root 出生时本来就是 resizable(1,1)，值相同 → Tk 一条消息都不发、**不重建**，
+    而用户得到的是原生的可缩放 + 可最大化（Tk 自己维护 WS_THICKFRAME，
+    也就不会像 Plan B 那样被 `wm geometry` 抹掉样式）。
+
+    可用 IPSCANER_NO_RESIZE_C=1 关闭（回退 Plan B：只加 Win32 样式、不动 wm）。
+    """
+    import os as _os
+    if _os.environ.get("IPSCANER_NO_RESIZE_C") == "1":
+        return 0
+    if root is None or getattr(root, "_ipscaner_resiz_redirect", False):
+        return 1
+    try:
+        orig = root.resizable
+    except Exception:  # noqa: BLE001
+        return 0
+
+    def resizable(w=True, h=True):
+        try:
+            if log is not None:
+                log("窗口可缩放（Plan C）：拦截 root.resizable(%r, %r) → 改写为 "
+                    "(True, True)（在 UI 建出之前，Tk 顶层窗不会被重建）" % (w, h))
+        except Exception:  # noqa: BLE001
+            pass
+        return orig(True, True)
+
+    resizable._ipscaner_resiz_redirect = True
+    try:
+        root.resizable = resizable          # 实例属性遮蔽 Wm.resizable
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("窗口可缩放（Plan C）拦截失败 %r" % (e,))
+        return 0
+    root._ipscaner_resiz_redirect = True
+    if log is not None:
+        log("窗口可缩放（Plan C）：已把 root.resizable 换值改写（True,True）；"
+            "产品后续任何 resizable(False,False) 都不再真正生效")
+    return 1
+
+
 def install_main_resize(app, log=None):
     """给主窗体装「窗口尺寸 → zoom」联动（幂等，按实例标记）。"""
     import os as _os
@@ -3303,15 +3433,43 @@ def install_main_resize(app, log=None):
         return 0
     if getattr(app, "_ipscaner_resize_link", False):
         return 1
+    # ⭐ 2026-10-14 二次重写（Plan C + Plan B 兜底）：
+    #    Plan C（默认）把 Tk 的 wm 真的变成可缩放 —— 但**在 UI 建出之前**换值，
+    #    不重建顶层窗；Plan B 保留为兜底与对照（只改 Win32 样式位、不动 wm）。
+    #    原来那三步里的 root.minsize(dw, dh) 仍是危险的（它把「窗口尺寸被系统
+    #    强制」拉进 Tk 的 wm 协商），最小尺寸改由 _do 里 `z < ZOOM_MIN → bounce`
+    #    兜底 —— 那条路径用实测客户区反推，比 minsize 更精确，也不碰 wm 状态。
+    _plan_c = bool(getattr(root, "_ipscaner_resiz_redirect", False))
+    _DB = _os.environ.get("IPSCANER_NO_RESIZE_B") == "1"
+    _DP = _os.environ.get("IPSCANER_NO_RESIZE_PACK") == "1"
+    _DD = _os.environ.get("IPSCANER_NO_RESIZE_D") == "1"
     app._ipscaner_resize_link = True
-    try:
-        cv.pack_configure(anchor="nw")
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        root.resizable(True, True)
-    except Exception:  # noqa: BLE001
-        pass
+    if not _DP:
+        # 窗口一旦比内容大，画布必须钉在**客户区左上**：pack 默认 anchor 是
+        # center，居中会让画布整体偏移，而所有弹层坐标（_popup_geometry）都以
+        # 客户区原点为基准 —— 偏移多少，菜单/悬浮提示就错多少。
+        try:
+            cv.pack_configure(anchor="nw")
+        except Exception as e:  # noqa: BLE001
+            if log is not None:
+                log("画布 anchor=nw 设置失败 %r" % (e,))
+    if not _DB:
+        try:
+            _ws_enable_thickframe(root, log=log, quiet=_plan_c)
+        except Exception as e:  # noqa: BLE001
+            if log is not None:
+                log("窗口可缩放（Win32 样式）失败 %r" % (e,))
+        # ⚠️ 只在 Plan B（Tk 仍认为不可缩放）下才需要重申：
+        #    Tk 在 resizable(False, False) 状态下，每次 `wm geometry` 都会按自己的
+        #    wm 状态重设窗口样式，把刚加上的 WS_THICKFRAME 抹掉（实测：设完
+        #    0x16CF0008，20 s 后读回 0x16CA0008）。Plan C 下 Tk 自己就是可缩放，
+        #    样式由 Tk 维护，这里只是幂等 no-op 兜底。
+        for _dl in (2500, 6000, 12000):
+            try:
+                root.after(_dl, lambda: _ws_enable_thickframe(root, log=log,
+                                                              quiet=True))
+            except Exception:  # noqa: BLE001
+                pass
     try:
         dw, dh = int(T.u(T.CLIENT_W)), int(T.u(T.CLIENT_H))
     except Exception:  # noqa: BLE001
@@ -3320,19 +3478,27 @@ def install_main_resize(app, log=None):
         # ⚠️ 实测（_probe_ms.txt）：Tk 在 Windows 上 `wm geometry` 与 `wm minsize`
         #    **都是客户区语义** —— geometry("800x500") 实测 client=800x500；
         #    minsize(1000,600) 实测 client=1000x600（外框恒 = (16,39)）。
-        #    早前这里写成 dw+fw/dh+fh 是把它当外框语义了，结果拖到底时客户区
-        #    是 1268x768 而不是 1252x729，zoom 永远回不到 1.0（实测 1.013）。
-        root.minsize(dw, dh)
+        #
+        # ⭐ 2026-10-14：root.minsize(dw, dh) 这一句**已移除**。
+        #    exe 实测（C 组）只跳过它就仍崩 4/5，而它又是把「窗口尺寸被系统强制」
+        #    拉进 Tk 的 wm 协商的一条路（与 resizable(True) 叠加时最危险）。
+        #    最小尺寸改由 _do 里 `z < ZOOM_MIN → bounce` 兜底 —— 那条路径用实测
+        #    客户区反推，比 minsize 更精确，而且不碰 wm 状态。
+        pass
     except Exception:  # noqa: BLE001
         pass
     state = {"t": None}
+    # 诊断计数（2026-10-14 调查「空闲 ~2s 后 Tcl_Panic」用，只写日志不改行为）
+    DIAG = {"conf": 0, "conf_all": 0, "do": 0, "bounce": 0, "geo": 0}
 
     def _conf(event):
+        DIAG["conf_all"] += 1      # 入口就计数（event.widget 过滤前）
         try:
             if event.widget is not root:
                 return
         except Exception:  # noqa: BLE001
             return
+        DIAG["conf"] += 1
         # 拖边框时 Configure 会连发，防抖到停手 140ms 再重算，避免每帧重绘
         try:
             if state["t"] is not None:
@@ -3343,6 +3509,8 @@ def install_main_resize(app, log=None):
             state["t"] = root.after(RESIZE_DEBOUNCE_MS, _do)
         except Exception:  # noqa: BLE001
             pass
+        if _verbose() and log is not None and (DIAG["conf"] <= 10 or DIAG["conf"] % 50 == 0):
+            log("缩放 _conf#%d（已重排 _do）" % DIAG["conf"])
 
     def _do():
         state["t"] = None
@@ -3352,6 +3520,7 @@ def install_main_resize(app, log=None):
             return
         if cw <= 1 or ch <= 1:
             return
+        DIAG["do"] += 1
         z = min(cw / float(dw), ch / float(dh))
         bounce = False
         if z < ZOOM_MIN:
@@ -3360,10 +3529,19 @@ def install_main_resize(app, log=None):
             z = ZOOM_MAX
 
         cur = float(getattr(app, "zoom", 1.0) or 1.0)
+        if _verbose() and log is not None and (DIAG["do"] <= 10 or DIAG["do"] % 25 == 0):
+            log("缩放 _do#%d：客户区 %dx%d 目标 %dx%d → z=%.4f bounce=%s cur=%.4f"
+                "（conf 累计 %d）"
+                % (DIAG["do"], cw, ch, dw, dh, z, bounce, cur, DIAG["conf"]))
         if bounce:
             # 小于内容下限 → 把客户区掰回下限（比 minsize 精确：直接用实测客户区）
+            DIAG["bounce"] += 1
+            if _verbose() and log is not None and DIAG["bounce"] <= 10:
+                log("缩放 bounce#%d → root.geometry(%dx%d)"
+                    % (DIAG["bounce"], dw, dh))
             try:
                 root.geometry("%dx%d" % (dw, dh))
+                DIAG["geo"] += 1
             except Exception:  # noqa: BLE001
                 pass
         if abs(z - cur) < 0.015:
@@ -3375,15 +3553,19 @@ def install_main_resize(app, log=None):
                 % (cw, ch, z, float(getattr(app, "_base_scale", 1.0) or 1.0) * z))
 
     try:
-        root.bind("<Configure>", _conf, add="+")
+        if not _DD:
+            root.bind("<Configure>", _conf, add="+")
     except Exception as e:  # noqa: BLE001
         app._ipscaner_resize_link = False
         if log is not None:
             log("窗口缩放绑定失败 %r" % (e,))
         return 0
     if log is not None:
-        log("主窗体已允许放大/缩小（窗口尺寸 ↔ zoom，内容等比适配；"
-            "最小客户区 %dx%d）" % (dw, dh))
+        log("主窗体已允许放大/缩小（%s；窗口尺寸 ↔ zoom 等比适配，"
+            "基准客户区 %dx%d）"
+            % ("Plan C：Tk 的 wm 已真正可缩放（WS_THICKFRAME 由 Tk 自己维护）"
+               if _plan_c else
+               "Plan B：Win32 样式启用、Tk 的 wm 仍为不可缩放", dw, dh))
     return 1
 
 
@@ -3447,7 +3629,10 @@ def patch_main_resize(root=None, log=None):
 # 运行期改常量。时机很关键：mainform 建窗时执行
 #   root.title(T.TITLE_TEXT + T.TITLE_VER)
 # 所以要在**第一次 title() 之前**改掉 theme.TITLE_VER。
-BUILD_VERSION = "1.27.0"          # 本修复层对应的交付版本
+BUILD_VERSION = "1.28.0"          # 本修复层对应的交付版本
+# v1.28.0 新增：需求38（快速 ping：IcmpSendEcho 替掉每台 spawn 一个 ping.exe，
+#             解决导入几百条 IP 时的卡顿/无响应）、需求39（IP 导入模板下载 + 说明）、
+#             需求37 补丁（「导入IP」按钮的圆角面归位，与「导出」等按钮 UI 统一）。
 
 
 def set_version(log=None, ver=None):
@@ -4292,7 +4477,15 @@ def make_memo_edit(dialogs, log=None):
 
 # ------------------------------------------------ F. 批量扫描弹窗增强
 IMPORT_BTN_BOX = (170, 477, 96, 26)     # 设计像素：底部「定时扫描」条左侧的空白处
-IMPORT_HINT_BOX = (280, 481, 160, 16)
+# 需求39（2026-10-13，用户：「我批量导入 ip 的时候，不知道按照什么格式填写，
+#   你要提供一个模板下载，模板里面要有说明」）
+# 底栏实测占位（设计 px）：「分」20 / Entry 44 / 定时扫描 84 / 导入表格 170~266
+#   原提示 280~440 / 「生成」620~694  → 272~368 是空的。
+# 于是再塞一个同宽按钮（和「导入表格」并排成对），并把提示右移到 376，
+# 右沿 536 距「生成」还有 84px，不挤。
+IMPORT_TPL_BOX = (272, 477, 96, 26)
+IMPORT_TPL_TEXT = "下载模板"
+IMPORT_HINT_BOX = (376, 481, 160, 16)
 
 # ---- 需求37：主界面「导入IP」入口 --------------------------------------------------
 # 工具栏那一行最右端是空白的：BTN_EXPORT 到 x=619，LBL_STAT「---」占 623..646，
@@ -4313,7 +4506,8 @@ IPS_EMPTY_HINT = (
     "  · 单个 IP      192.168.1.10\n"
     "  · 整个网段     192.168.1.0/24   或   192.168.1\n"
     "  · 连续范围     192.168.1.1-192.168.1.50\n"
-    "可以混着写，也可以跨网段（会去重 + 按 IP 排序）。")
+    "可以混着写，也可以跨网段（会去重 + 按 IP 排序）。\n\n"
+    "不知道怎么填？点底部的【下载模板】，模板里带说明。")
 
 
 def _find_child(top, cls=None, text=None):
@@ -4326,6 +4520,210 @@ def _find_child(top, cls=None, text=None):
             return c
         except Exception:  # noqa: BLE001
             continue
+    return None
+
+
+# --------------------------------------------------------- G. IP 导入模板（需求39）
+# 用户原话：「我批量导入 ip 的时候，不知道按照什么格式填写，你要提供一个模板下载，
+#           模板里面要有说明。」
+#
+# 两条硬约束（都是这套读取器的既有性质，写模板之前必须先想清楚）：
+#  ① `extract_ip_targets` 是**从任意文本里正则捞 IP**（`\d{1,3}(\.\d{1,3}){3}`），
+#     所以「说明」文字里一旦出现完整四段 IP，它就会被当成真实扫描目标。
+#     → 说明里的示例地址一律写成 `192.168.x.1` 这种**带字母的占位形式**，
+#       正则不匹配，天然安全。
+#  ② 示例数据用 RFC 5737 测试保留段（192.0.2.x）。用户即使忘了替换、
+#     直接把模板导进去，也只会去 ping 一个文档专用地址，**不会误扫真实网络**。
+#
+# 写法以 `extract_ip_targets` 的正则为唯一准绳（三种，可混用）：
+#     起始-结束  192.168.1.1-192.168.1.254，或尾号简写 192.168.1.1-50
+#     CIDR       192.168.1.0/24
+#     单个       192.168.1.1
+
+_TPL_PH = "192.168.x"                       # 说明里的占位网段（含字母 → 不匹配 IP 正则）
+_TPL_SAMPLE = ("192.0.2.10", "192.0.2.11", "192.0.2.20-192.0.2.24")
+
+
+def _tpl_desc_rows():
+    """xlsx「使用说明」工作表的行。"""
+    ph = _TPL_PH
+    return [
+        ["支持的格式", ".xlsx / .xlsm / .csv / .txt —— Excel、CSV、纯文本都行"],
+        ["三种写法", "下面三种可以混在同一个文件里，程序会全部识别"],
+        ["① 每行一个", "把 IP 一列写下来，一行一个即可（最常用）"],
+        ["② 连续区间", "写「起始IP-结束IP」，例如 %s.1-%s.254，会展开成整段\n"
+                       "也可以只写尾号：%s.1-%s.50" % (ph, ph, ph, ph)],
+        ["③ CIDR 网段", "例如 %s.0/24，等价于整段 254 个地址" % ph],
+        ["整列读取", "Excel 里把 IP 放在同一列（哪一列都行），程序会自动找出全部 IP"],
+        ["跨网段", "不同网段的 IP 可以放同一个文件，一次全扫，自动去重排序"],
+        ["表头", "标题行（如「IP地址」「用途」）会被自动忽略，不用手工删"],
+        ["备注列", "第二列可以写用途备注；导入后不会丢，也能在结果表里右键再改"],
+        ["", ""],
+        ["注意 1", "示例 IP（192.0.2.x）是测试专用保留地址，请替换成你要扫的 IP"],
+        ["注意 2", "本说明里的地址都写成 %s 这种占位形式，不会被当成要扫的 IP" % ph],
+        ["注意 3", "请只扫描你自己拥有、或已获得授权扫描的网络"],
+        ["", ""],
+        ["怎么用", "填好本表 → 保存 → 程序里点主界面「导入IP」或批量窗「导入表格」→ 选本文件"],
+    ]
+
+
+def _tpl_sample_rows():
+    return [[ip, "示例 · 请替换成真实 IP"] for ip in _TPL_SAMPLE]
+
+
+def _tpl_text_lines():
+    """csv / txt 版模板全文（说明写成 # 注释行）。"""
+    ph = _TPL_PH
+    lines = [
+        "# ============ IPScaner · IP 批量导入模板 ============",
+        "# 支持 .xlsx / .xlsm / .csv / .txt；下面三种写法可混用，程序会全部识别。",
+        "#",
+        "# ① 每行一个 IP（最常用）",
+        "# ② 连续区间：「起始IP-结束IP」，例如 %s.1-%s.254；也可只写尾号 %s.1-%s.50"
+        % (ph, ph, ph, ph),
+        "# ③ CIDR 网段：例如 %s.0/24（等价整段）" % ph,
+        "#",
+        "# · 也可以把 IP 放在表格的任意一列，程序会自动找出来",
+        "# · 不同网段可以混在同一个文件里，一次全扫，自动去重排序",
+        "# · 表头/标题行（如「IP地址」「用途」）会被自动忽略，不用删",
+        "# · 第二列可以写用途备注，导入后不丢",
+        "# · 请只扫描你自己拥有、或已获得授权扫描的网络",
+        "#",
+        "# 注意：本文件的说明里，地址都写成 %s 这种占位形式，" % ph,
+        "#       正则扫不到，不会被当成要扫的 IP。",
+        "#",
+        "# ↓↓↓ 请把下面几行替换成你要扫的 IP ↓↓↓",
+    ]
+    lines += ["%s,示例 · 请替换成真实 IP" % ip for ip in _TPL_SAMPLE]
+    return lines
+
+
+def save_import_template(parent=None, log=None):
+    """弹出「另存为」，写出带说明的 IP 导入模板。返回保存路径；取消/失败返回 None。"""
+    from tkinter import filedialog, messagebox
+    import os as _o
+
+    parent = _as_widget(parent)      # 同 _maybe_offer_template：parent 可能已被销毁
+    title = "保存 IP 导入模板"
+    try:
+        p = filedialog.asksaveasfilename(
+            parent=parent, title=title, defaultextension=".xlsx",
+            initialfile="IP导入模板.xlsx",
+            filetypes=[("Excel 工作簿（含说明页）", "*.xlsx"),
+                       ("CSV 逗号分隔", "*.csv"),
+                       ("文本文件", "*.txt")])
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求39 保存模板：asksaveasfilename 抛异常 %r" % (e,))
+        return None
+    if not p:
+        if log is not None:
+            log("需求39 保存模板：用户取消（返回空路径）")
+        return None
+
+    ext = _o.path.splitext(p)[1].lower()
+    try:
+        if ext in (".xlsx", ".xlsm"):
+            write_xlsx(p, [("使用说明", ["项目", "说明"], _tpl_desc_rows()),
+                           ("IP列表", ["IP地址", "用途备注"], _tpl_sample_rows())],
+                       log=log)
+        else:
+            # utf-8-sig：Excel 双击打开 csv 时才不会乱码（读取器也优先按它解）
+            with open(p, "w", encoding="utf-8-sig", newline="") as f:
+                f.write("\r\n".join(_tpl_text_lines()) + "\r\n")
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求39 保存模板失败 %r" % (e,))
+        try:
+            messagebox.showwarning(title, "模板保存失败：\n%r" % (e,), parent=parent)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    if log is not None:
+        log("需求39 模板已保存 %r（扩展名 %s）" % (p, ext or "无"))
+    try:
+        messagebox.showinfo(
+            title,
+            "模板已保存到：\n%s\n\n"
+            "· 选 .xlsx 会带「使用说明」+「IP列表」两个工作表\n"
+            "· 示例 IP 是测试保留段，请替换成你要扫的 IP\n\n"
+            "填好后点「导入IP」或「导入表格」选中它即可。" % p,
+            parent=parent)
+    except Exception:  # noqa: BLE001
+        pass
+    return p
+
+
+def _as_widget(x):
+    """把「可能是 MainForm 实例 / 可能是 widget / 可能是 None」的 parent 归一成 widget。
+
+    ⚠️ 这个坑很阴：`tkinter.messagebox.askyesno(parent=X)` / `filedialog.*(parent=X)`
+       内部会走 `BaseWidget.__init__`，第一件事就是取 `master.tk`。
+       而我们代码里的 `main` 是 **MainForm 实例**（`mainform.MainForm`），它**不是**
+       widget —— 只有 `main.root` 才是。传错不会报"parent 不合法"，而是
+       抛 `AttributeError: 'MainForm' object has no attribute 'tk'`，
+       再被调用处的 `except` 吞掉 → **功能静默失效**（弹框永远不出来）。
+       2026-10-13 真机验收抓到过一次（批量窗那条路能弹、主界面那条不能）。
+
+    ⚠️ 2026-10-14 又抓到第二种：**parent 是个已经被销毁的 Toplevel**。
+       路径是「批量窗 →「导入表格」→ 选文件对话框 → 用户在对话框上取消」，
+       而此刻批量窗已经被关掉了（真机验收的探针就是这么干的：它误判"对话框没弹"
+       就去关批量窗）。`_as_widget` 当时只看"有没有 .tk"，销毁后的 Toplevel
+       仍然有 `.tk` → 直接把它递给 `askyesno` →
+       `TclError: bad window path name ".!toplevel14"` → 询问框永远不出现。
+       → 所以这里再加一道**存活检查**：路径名不在了就往上退到 Tk 主窗。
+       （`winfo_exists()` 对已销毁控件返回 0；对 MainForm 实例直接抛异常。）
+    """
+    if x is None:
+        return None
+
+    def _alive(w):
+        try:
+            return bool(int(w.winfo_exists()))
+        except Exception:  # noqa: BLE001
+            return False
+
+    for _c in (x, getattr(x, "root", None)):
+        if _c is not None and hasattr(_c, "tk") and _alive(_c):
+            return _c
+    try:
+        import tkinter as _tk
+        _dr = _tk._default_root
+        if _dr is not None and _alive(_dr):
+            return _dr
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _maybe_offer_template(parent=None, log=None):
+    """用户在「选文件」对话框上按了取消 → 顺手问一句要不要先拿模板。
+
+    为什么挂在「取消」上：用户抱怨的是「**不知道按什么格式填**」。
+    这种状态下他最可能的行为就是——打开选文件框、发现自己没有合规的文件、
+    直接取消走人。所以「取消」这一个动作点，才是模板入口真正该出现的地方，
+    而不是藏在别的菜单里等他去找。
+    """
+    from tkinter import messagebox
+
+    parent = _as_widget(parent)
+    try:
+        yes = messagebox.askyesno(
+            "导入 IP 表格",
+            "还没选择文件。\n\n"
+            "不知道表格里该按什么格式填 IP？\n"
+            "可以先下载一个自带说明的模板，照着填好再导进来。\n\n"
+            "现在下载模板吗？",
+            parent=parent)
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求39 取消后询问模板：askyesno 抛异常 %r" % (e,))
+        return None
+    if log is not None:
+        log("需求39 取消后询问模板：用户选择 %s" % ("下载" if yes else "不用"))
+    if yes:
+        return save_import_template(parent=parent, log=log)
     return None
 
 
@@ -4382,6 +4780,7 @@ def _import_table(top, seg, dialogs, log=None):
     if not p:
         if log is not None:
             log("需求36 导入表格：用户取消（返回空路径）")
+        _maybe_offer_template(parent=top, log=log)
         return
     n, _note = _read_ips_into(seg, p, log=log, title=title)
     if n:
@@ -4434,6 +4833,14 @@ def main_import_ips(main, log=None):
     if not p:
         if log is not None:
             log("需求37 用户取消（返回空路径）")
+        # ⚠️ `main` 是 MainForm **实例**，不是 Tk widget ——
+        #    直接 `parent=main` 会让 `tkinter.messagebox` 在
+        #    `BaseWidget.__init__` 里取 `master.tk` 时抛 AttributeError
+        #    （被下面的 except 吞掉 → 功能静默失效）。必须取它背后的 root。
+        #    2026-10-13 真机验收时抓到：batch 窗那条路（parent=top）能弹，
+        #    主界面这条路弹不出来。
+        _pr = getattr(main, "root", None)
+        _maybe_offer_template(parent=_pr, log=log)
         return 0
     if log is not None:
         log("需求37 选中文件 %r" % (p,))
@@ -4619,6 +5026,55 @@ def decorate_ipsegment(main, top, dialogs, log=None):
     except Exception as e:  # noqa: BLE001
         if log is not None:
             log("需求36 导入表格按钮创建失败 %r" % (e,))
+
+    # ---- ①a 「下载模板」按钮（需求39）----
+    # 用户原话：「我批量导入 ip 的时候，不知道按照什么格式填写，你要提供一个模板下载」。
+    # 放在「导入表格」正右边并排成对（导入/拿模板是一条动线的两个动作），
+    # 顺手把原来 280 起的那行提示右移到 376，给按钮腾位。
+    try:
+        if _find_child(top, cls="Button", text=IMPORT_TPL_TEXT) is None:
+            tbox = IMPORT_TPL_BOX
+            if S != 1.0:
+                tbox = tuple(int(round(v * S)) for v in tbox)
+            tfont = (DIALOG_FAMILY, _scale_px(DESIGN_PX, S))
+            tb = _tk.Button(top, text=IMPORT_TPL_TEXT, font=tfont, bg=APPLE_CARD,
+                            fg=APPLE_TEXT, relief="flat", bd=0, cursor="hand2",
+                            highlightthickness=1, highlightbackground=APPLE_BORDER,
+                            activebackground=APPLE_SELECT,
+                            activeforeground=APPLE_TEXT,
+                            command=lambda: save_import_template(parent=top, log=log))
+            # 同款事件送达取证：有这条日志 = 点击真落在按钮上
+            try:
+                def _on_press_t(_e, _log=log):
+                    if _log is not None:
+                        try:
+                            _log("需求39「下载模板」收到 <Button-1> 局部(%d,%d)"
+                                 % (_e.x, _e.y))
+                        except Exception:  # noqa: BLE001
+                            pass
+                tb.bind("<Button-1>", _on_press_t)
+            except Exception:  # noqa: BLE001
+                pass
+            tb.place(x=tbox[0], y=tbox[1], width=tbox[2], height=tbox[3])
+            if log is not None:
+                log("需求39 批量扫描：已加「下载模板」按钮 place=%s（设计 %s，此刻 S=%.2f）"
+                    % (tbox, IMPORT_TPL_BOX, S))
+                try:
+                    def _log_final_t(_b=tb, _S=S):
+                        try:
+                            log("需求39 下载模板按钮终态 x=%d y=%d w=%d h=%d"
+                                "（设计 %s × S=%.2f → 期望 %s）"
+                                % (_b.winfo_x(), _b.winfo_y(), _b.winfo_width(),
+                                   _b.winfo_height(), IMPORT_TPL_BOX, _S,
+                                   tuple(int(round(v * _S)) for v in IMPORT_TPL_BOX)))
+                        except Exception:  # noqa: BLE001
+                            pass
+                    top.after(900, _log_final_t)
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求39 下载模板按钮创建失败 %r" % (e,))
 
     # ---- ①b 回读窗内**所有**按钮的屏幕坐标（自动化点击的权威取证）----
     # ⚠️ 为什么必须打屏幕坐标：真机验收脚本用 SendInput 点击，必须拿到
@@ -4857,6 +5313,23 @@ def patch_main_import(mainform, log=None):
     MF._ipscaner_req37_done = True
     done = 0
 
+    # ---- ⓪ 把设计框挂到 theme 上，让 resnap_toolbar 能认出这个按钮 ----
+    # `resnap_toolbar` 是**按 `BTN_BOXES` 到 theme 上取设计框**（`getattr(_T, key)`），
+    # 再拿 1:1 框去匹配画布上没缩放的 polygon 面、把它搬成 设计xS。
+    # ⚠️ 交付 exe 跑的是 `build_green/theme.pyc`，里面**没有** BTN_IMPORT
+    #    （`src/theme.py` 里那份是给将来 Phase 3 回灌用的，不是运行代码）→
+    #    必须在运行期把常量注入进去，否则第 ④ 步的补丁形同虚设。
+    try:
+        import theme as _Treq37
+        if getattr(_Treq37, "BTN_IMPORT", None) is None:
+            _Treq37.BTN_IMPORT = MAIN_IMPORT_BTN
+            if log is not None:
+                log("需求37 已把设计框注入 theme.BTN_IMPORT = %s（供按钮面归位使用）"
+                    % (MAIN_IMPORT_BTN,))
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求37 注入 theme.BTN_IMPORT 失败 %r" % (e,))
+
     # ---- ① 工具栏按钮 ----
     _orig_tb = MF._draw_toolbar_base
 
@@ -5014,6 +5487,152 @@ def patch_req36(root=None, log=None):
 
 
 # ------------------------------------------------------------------ 5. 一体化安装
+# ------------------------------------------------------------------ 4.97 快速 ping
+# 需求38（2026-10-13，用户原话：「我刚才导入 ip 时，又卡顿闪退了」）
+#
+# 归因过程（源码态飞行测试 + 主线程栈采样 + 单变量隔离，全部可复现）：
+#   `core.ping_once()` 每台主机都 **spawn 一个 ping.exe**
+#   （`core.run_cmd` → `subprocess.run(['ping', '-n', '1', '-w', '500', ip])`）。
+#   765 台 = 765 个子进程，并发 254 个。
+#   Windows 上 `subprocess` 的 `Popen.__init__`（含 `_winapi.CreateProcess`）
+#   **全程持有 GIL**，单个 CreateProcess 在有安全软件钩子的机器上是几十毫秒级。
+#   于是主线程在 254 条线程反复独占 GIL 的缝隙里抢不到执行权
+#   → 心跳（after 80ms）被拖到 1.5~3.0 秒 → Windows 判定「窗口无响应」。
+#
+#   单变量实验证据（同一份代码，每次只改一个变量）：
+#     · 正常 spawn ping.exe     最大心跳 1529.7 ms / 卡顿 11 次
+#     · 不 spawn（ping 恒不通） 最大心跳  154.6 ms / 卡顿  0 次   ← 归因确证
+#     · 完全空闲（不扫描）      最大心跳  265.7 ms / 卡顿  1 次
+#     · workers 254 → 32        最大心跳 2219.7 ms（**无改善**：总 GIL 占用不变）
+#     · switchinterval 5ms→0.5ms 反而恶化到 6996.1 ms
+#   被排除的嫌疑人：Tcl/Treeview 回填（主线程插 765 行只要 104 ms、卡顿 0 次）、
+#   修复层 sweep（空闲基线干净）、线程垫片派发（加了时间预算也无改善）。
+#
+# 修法：把 `core.ping_once` 换成 Win32 `IcmpSendEcho`。
+#   · 不创建任何进程（快一个数量级）
+#   · `WinDLL` 是 `CDLL` 子类，调用时**释放 GIL** → 主线程不再被饿
+#   · 是真正的 ICMP echo request，语义与系统 ping 一致
+#   · 契约保持一致：返回 `(alive: bool, rtt_ms: int | None)`
+#   · 任何一步不可用（dll 缺失/句柄失败）→ 返回 None → 自动回退原实现
+#   `IPSCANER_NO_FASTPING=1` 可整体回退做 A/B 对照。
+
+_icmp_lib = None
+_icmp_ready = None
+
+
+class _IP_OPTION_INFORMATION(ctypes.Structure):
+    _fields_ = [("Ttl", ctypes.c_ubyte), ("Tos", ctypes.c_ubyte),
+                ("Flags", ctypes.c_ubyte), ("OptionsSize", ctypes.c_ubyte),
+                ("OptionsData", ctypes.c_void_p)]
+
+
+class _ICMP_ECHO_REPLY(ctypes.Structure):
+    _fields_ = [("Address", ctypes.c_ulong), ("Status", ctypes.c_ulong),
+                ("RoundTripTime", ctypes.c_ulong), ("DataSize", ctypes.c_ushort),
+                ("Reserved", ctypes.c_ushort), ("Data", ctypes.c_void_p),
+                ("Options", _IP_OPTION_INFORMATION)]
+
+
+def _bind_icmp(log=None):
+    """绑定 iphlpapi。成功返回 dll，失败返回 None（并缓存结果）。"""
+    global _icmp_lib, _icmp_ready
+    if _icmp_ready is not None:
+        return _icmp_lib
+    try:
+        lib = ctypes.WinDLL("iphlpapi")
+        lib.IcmpCreateFile.restype = ctypes.c_void_p
+        lib.IcmpCreateFile.argtypes = []
+        lib.IcmpSendEcho.restype = ctypes.c_ulong
+        lib.IcmpSendEcho.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_char_p, ctypes.c_ushort,
+            ctypes.POINTER(_IP_OPTION_INFORMATION), ctypes.c_void_p,
+            ctypes.c_ulong, ctypes.c_ulong]
+        lib.IcmpCloseHandle.restype = ctypes.c_int
+        lib.IcmpCloseHandle.argtypes = [ctypes.c_void_p]
+        _icmp_lib = lib
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求38 iphlpapi 绑定失败（将回退系统 ping）%r" % (e,))
+        _icmp_lib = None
+    _icmp_ready = True
+    return _icmp_lib
+
+
+_ICMP_BUF = ctypes.sizeof(_ICMP_ECHO_REPLY) + 64
+
+
+def _icmp_ping_once(ip, timeout_ms=500):
+    """ctypes ICMP echo。返回 (alive, rtt_ms)；返回 None 表示此路不通、请回退。"""
+    import socket as _s
+
+    lib = _bind_icmp()
+    if lib is None:
+        return None
+    try:
+        handle = lib.IcmpCreateFile()
+    except Exception:  # noqa: BLE001
+        return None
+    if not handle or handle == ctypes.c_void_p(-1).value:
+        return None
+    try:
+        try:
+            # IcmpSendEcho 的 Address 取「网络字节序的 IPv4」整数，
+            # 与 inet_addr() 的返回值同构：内存里就是 inet_aton 的 4 字节。
+            addr = int.from_bytes(_s.inet_aton(ip), "little")
+        except OSError:
+            return (False, None)
+        payload = b"ipscaner"
+        opt = _IP_OPTION_INFORMATION(128, 0, 0, 0, None)   # TTL=128
+        buf = ctypes.create_string_buffer(_ICMP_BUF)
+        # ⚠️ 这一句是 WinDLL 调用 → **释放 GIL**（本次修复的关键）
+        n = lib.IcmpSendEcho(handle, addr, payload, len(payload),
+                             ctypes.byref(opt), buf, len(buf),
+                             int(max(1, timeout_ms)))
+        if not n:
+            return (False, None)                 # 超时/不可达
+        rep = _ICMP_ECHO_REPLY.from_buffer(buf)
+        if int(rep.Status) == 0:                 # IP_SUCCESS
+            return (True, int(rep.RoundTripTime))
+        return (False, None)
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        try:
+            lib.IcmpCloseHandle(handle)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def install_fast_ping(core_mod, log=None):
+    """把 core.ping_once 换成 ctypes IcmpSendEcho（幂等）。返回 1 表示装上了。"""
+    import os as _o
+    if _o.environ.get("IPSCANER_NO_FASTPING") == "1":
+        if log is not None:
+            log("需求38 IPSCANER_NO_FASTPING=1 → 跳过快速 ping（保留系统 ping）")
+        return 0
+    if getattr(core_mod, "_ipscaner_fastping", False):
+        return 0
+    orig = getattr(core_mod, "ping_once", None)
+    if orig is None:
+        return 0
+    if _bind_icmp(log=log) is None:
+        return 0
+
+    def ping_once(ip, timeout_ms=500):
+        r = _icmp_ping_once(ip, timeout_ms)
+        if r is None:                    # 运行中不可用 → 静默回退
+            return orig(ip, timeout_ms)
+        return r
+
+    ping_once._ipscaner_fastping = True
+    core_mod.ping_once = ping_once
+    core_mod._ipscaner_fastping = True
+    if log is not None:
+        log("需求38 已接管 core.ping_once → ctypes IcmpSendEcho"
+            "（不再 spawn ping.exe；IcmpSendEcho 调用释放 GIL）")
+    return 1
+
+
 # ------------------------------------------------------------------ 4.95 线程安全垫片
 # 2026-10-07 用户实测：IP 批量扫描「扫描完成会直接退出（闪退）」「经常闪退」。
 # 反汇编定位（dialogs.py:518-529，见 notes/全面验收报告_20261004.md 第十节）：
@@ -5038,6 +5657,7 @@ def patch_req36(root=None, log=None):
 
 def install_thread_shim(root, log=None):
     import threading
+    import time
     import collections
     import tkinter as _tk
     try:
@@ -5069,7 +5689,28 @@ def install_thread_shim(root, log=None):
             # 静默跳过，绝不能让一个回调炸掉整条派发链。
             pass
 
+    # ---- 每轮派发的时间预算（需求38：治「导入 IP 后卡顿」）----
+    # 2026-10-13 用户实测：「批量导入 ip 时又卡顿闪退了」。
+    # 源码态飞行测试（765 个目标）量到主线程**最长冻结 2453 ms**、
+    # 30 秒里有 ~40% 的时间处于卡顿 —— Windows 会判定「无响应」，
+    # 用户看到的就是「卡死/闪退」。但进程**并没有崩**（Tk 回调异常 0 条、进程存活），
+    # 所以这不是第二类真闪退，而是**第一类：主线程被灌爆**。
+    #
+    # 机理：`f_ipsegment` 的工作线程每收到一条结果就
+    #   `top.after(0, lambda r=row: tv.insert('', 'end', values=...))`
+    # 而并发是 `min(254, len(ips))`，几百条结果会在几秒内**集中爆发**。
+    # 原来的 `_drain()` 是「拿着锁把队列一次性排空」，于是主线程一口气
+    # 跑几百次 `Treeview.insert`（单次约 3 ms）→ 一次冻结 2.4 s。
+    #
+    # 修法：给每轮派发一个**时间预算**，超出就把剩下的留到下一轮。
+    # 这样单次连续占用主线程 ≤ 预算（远低于 ~100 ms 的「卡顿感」阈值），
+    # 代价只是结果分几批显示（扫描本身完全不受影响）。
+    # 预算取 25 ms：既保证吞吐（每轮实际处理量 ≈ 8 条），又保证可响应。
+    DRAIN_BUDGET_MS = 25.0
+    DRAIN_TICK_MS = 20
+
     def _drain():
+        t0 = time.monotonic()
         try:
             while True:
                 with lock:
@@ -5086,9 +5727,13 @@ def install_thread_shim(root, log=None):
                         pass
                 else:
                     _exec(sid, func, args)
+                # 预算用尽 → 停止本轮，把主线程还给事件循环。
+                # 剩下的项下一轮（DRAIN_TICK_MS 后）继续派发，**绝不丢**。
+                if (time.monotonic() - t0) * 1000.0 >= DRAIN_BUDGET_MS:
+                    break
         finally:
             try:
-                real_after(root, 40, _drain)
+                real_after(root, DRAIN_TICK_MS, _drain)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -5177,12 +5822,180 @@ def install_thread_shim(root, log=None):
 
     _tk.Misc._ipscaner_thread_shim = True
     try:
-        real_after(root, 40, _drain)
+        real_after(root, DRAIN_TICK_MS, _drain)
     except Exception:  # noqa: BLE001
         pass
     if log is not None:
-        log("线程安全垫片已安装（after 派发 + Treeview 编组）")
+        log("线程安全垫片已安装（after 派发 + Treeview 编组；"
+            "派发预算 %.0fms / 轮，周期 %dms）" % (DRAIN_BUDGET_MS, DRAIN_TICK_MS))
     return True
+
+
+_CRASH_CB = [None]
+
+
+def _verbose():
+    """诊断日志总开关。
+
+    交付版默认静默：sweep 逐轮心跳、`_conf`/`_do` 逐次记录只在
+    `IPSCANER_VERBOSE=1` 时输出（排查「空闲崩溃」时就是靠这些定位的）。
+    """
+    import os as _o
+    return _o.environ.get("IPSCANER_VERBOSE") == "1"
+
+
+def install_crash_dump(log=None):
+    """挂 UnhandledExceptionFilter，把崩溃瞬间的 Python 栈写进修复层日志。
+
+    为什么需要：冻结版 windowed 的 sys.stderr 是 None（bootloader 指到 NUL），
+    `Tcl_Panic()` 的原因字符串（最经典的是
+    "Tcl_AsyncDelete: async handler deleted by the wrong thread"）根本看不到，
+    我们只能从事件日志看到 `tcl86t.dll` + 0x80000003（= STATUS_BREAKPOINT，
+    即 Tcl 主动 DebugBreak 自杀）。挂上过滤器后至少能知道**崩溃时 Python 在
+    哪一行**（Tcl_Panic 走 DebugBreak → 未捕获异常 → 本过滤器）。
+    `IPSCANER_CRASH_DUMP=0` 可关闭（交付版建议关，定位期间默认开）。
+    """
+    import os as _o
+    if _o.environ.get("IPSCANER_CRASH_DUMP", "0") != "1":
+        return 0
+    try:
+        import ctypes
+        import sys as _sys
+        import traceback as _tb
+        from ctypes import wintypes
+        _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _k32.SetUnhandledExceptionFilter.restype = ctypes.c_void_p
+        _k32.SetUnhandledExceptionFilter.argtypes = [ctypes.c_void_p]
+        _ft = ctypes.WINFUNCTYPE(wintypes.LONG, ctypes.c_void_p)
+
+        def _cb(_ep):
+            try:
+                if log is not None:
+                    log("!!!! 未捕获异常过滤器触发 → dump 全部 Python 栈 !!!!")
+                    for _tid, _fr in list(_sys._current_frames().items()):
+                        log("---- thread %s ----" % _tid)
+                        for _ln in _tb.format_stack(_fr):
+                            log(_ln.rstrip())
+            except Exception:  # noqa: BLE001
+                pass
+            return 0                     # EXCEPTION_CONTINUE_SEARCH
+
+        _CRASH_CB[0] = _ft(_cb)          # ⚠️ 必须持引用，否则被 GC 回收
+        _k32.SetUnhandledExceptionFilter(_CRASH_CB[0])
+        if log is not None:
+            log("崩溃现场转储已安装（IPSCANER_CRASH_DUMP）")
+        return 1
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("崩溃现场转储安装失败 %r" % (e,))
+        return 0
+
+
+_PANIC_IO = [None]
+
+
+def install_panic_capture(log=None):
+    """把 C 层 stderr（fd 2 + CRT 的 stderr FILE*）重定向到文件。
+
+    冻结版 windowed 的 sys.stderr is None（bootloader 指到 NUL），于是
+    `Tcl_Panic()` 打印的原因字符串（最经典的是
+    "Tcl_AsyncDelete: async handler deleted by the wrong thread"）就丢了。
+    这里把 fd 2 和 CRT 的 stderr FILE* 一起指到
+    `%TEMP%\\IPScaner_panic.txt`，panic 消息就能留住。
+    `IPSCANER_PANIC_CAPTURE=1` 才开（默认关，交付版不动用户的 stderr）。
+    """
+    try:
+        import os as _o2
+        path = _o2.path.join(_o2.environ.get("TEMP") or _o2.path.expanduser("~"),
+                             "IPScaner_panic.txt")
+        f = open(path, "ab", buffering=0)
+        _PANIC_IO[0] = f                      # 必须持引用，否则被 GC 关闭
+        try:
+            _o2.dup2(f.fileno(), 2)           # ① fd 2（直接 write 的路径）
+        except Exception:  # noqa: BLE001
+            pass
+        try:                                  # ② CRT 的 stderr FILE*
+            import ctypes
+            _ucrt = ctypes.CDLL("ucrtbase")
+            _ucrt.freopen.restype = ctypes.c_void_p
+            _ucrt.freopen.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                                      ctypes.c_void_p]
+            try:
+                # ⚠️ __acrt_iob_func 在 ucrtbase 里，不在 msvcrt（Py3.10 用 UCRT）；
+                #    从 msvcrt 取会 AttributeError → _sp=None → freopen 根本不执行。
+                _ucrt.__acrt_iob_func.restype = ctypes.c_void_p
+                _ucrt.__acrt_iob_func.argtypes = [ctypes.c_uint]
+                _sp = _ucrt.__acrt_iob_func(2)
+            except Exception:  # noqa: BLE001
+                _sp = None
+            if _sp:
+                _ucrt.freopen(path.encode("mbcs", "replace"), b"ab", _sp)
+        except Exception as e:  # noqa: BLE001
+            if log is not None:
+                log("panic 捕获：CRT stderr 重定向失败 %r" % (e,))
+        if log is not None:
+            log("panic 捕获已安装 → %s" % path)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("panic 捕获安装失败 %r" % (e,))
+        return 0
+
+
+_TCL_PANIC_CB = [None]
+
+
+def install_tcl_panic_hook(log=None):
+    """用 Tcl_SetPanicProc 接管 Tcl 的 panic 回调，把原因字符串落进日志。
+
+    为什么必须用这条路：实测（2026-10-14）
+      · 重定向 C 层 stderr → panic 文件仍 0 B（Tcl_Panic 那句 fprintf 没到 CRT）
+      · SetUnhandledExceptionFilter → 完全没被调用（Tcl 不走这条路）
+      · 事件日志只留下 `tcl86t.dll` + 0x80000003（Tcl 主动 DebugBreak）
+    Tcl 在 DebugBreak **之前**会先调 panicProc（如果装了），这是唯一能在
+    「进程还活着」时把消息取出来的窗口；_log 每次 write 后 flush，所以能留住。
+    ⚠️ Tcl_PanicProc 的签名是 `void(const char *format, va_list argList)` ——
+    第二个参数在 x64 上是指针，别按 varargs 解析，直接读 format 串即可
+    （Tcl 的 panic 调用基本是 `Tcl_Panic("Tcl_AsyncDelete: ...")` 这种无参格式串）。
+    `IPSCANER_TCL_PANIC=1` 才开。
+    """
+    import os as _o
+    if _o.environ.get("IPSCANER_TCL_PANIC") != "1":
+        return 0
+    try:
+        import ctypes
+        _tcl = ctypes.CDLL("tcl86t.dll")
+        _ft = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
+
+        def _cb(_fmt, _args):
+            _m = (_fmt or b"").decode("utf-8", "replace")
+            # ① 最原始的一条：直接写文件。panic 上下文里 Python 状态可能已经不可靠，
+            #    不能再依赖修复层的 log()（它有自己的编码/异常处理链）。
+            try:
+                _pf2 = _o.path.join(_o.environ.get("TEMP") or ".", "IPScaner_panic_msg.txt")
+                with open(_pf2, "a", encoding="utf-8") as _f2:
+                    _f2.write("Tcl_Panic: %s\n" % _m)
+                    _f2.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            # ② 再走修复层日志
+            try:
+                if log is not None:
+                    log("!!!!!! Tcl_Panic：%s" % _m)
+            except Exception:  # noqa: BLE001
+                pass
+
+        _TCL_PANIC_CB[0] = _ft(_cb)          # 必须持引用
+        _tcl.Tcl_SetPanicProc.restype = None
+        _tcl.Tcl_SetPanicProc.argtypes = [ctypes.c_void_p]
+        _tcl.Tcl_SetPanicProc(ctypes.cast(_TCL_PANIC_CB[0], ctypes.c_void_p))
+        if log is not None:
+            log("Tcl panic 回调已接管（Tcl_SetPanicProc）")
+        return 1
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("Tcl panic 回调接管失败 %r" % (e,))
+        return 0
 
 
 def install(root, log=None, sweep_ms=500, get_scale=None):
@@ -5199,6 +6012,20 @@ def install(root, log=None, sweep_ms=500, get_scale=None):
         子窗体都有标题栏）。
     """
     import tkinter as _tk
+
+    # 崩溃现场转储（2026-10-14 调查「主窗空闲 ~2s 后 tcl86t.dll / 0x80000003」）
+    try:
+        install_crash_dump(log=log)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import os as _os0
+        if _os0.environ.get("IPSCANER_PANIC_CAPTURE") == "1":
+            install_panic_capture(log=log)
+        if _os0.environ.get("IPSCANER_TCL_PANIC") == "1":
+            install_tcl_panic_hook(log=log)
+    except Exception:  # noqa: BLE001
+        pass
 
     # 版本号覆盖要在**最前面** —— 必须在 root.title() 首次执行之前改掉
     # theme.TITLE_VER，否则标题栏会一直显示绿色版的 "Ver: 1.25.0"。
@@ -5221,6 +6048,29 @@ def install(root, log=None, sweep_ms=500, get_scale=None):
                 log("线程垫片安装失败 %r" % (e,))
     elif log is not None:
         log("线程垫片被 IPSCANER_NO_THREAD_SHIM 关闭（对照实验模式）")
+
+    # ⭐⭐ 窗口可缩放（Plan C）：**必须在这里**装 —— install() 跑在 tk.Tk.__init__
+    #    的尾巴上，而产品 `gui.main()` 紧接着才会 `MainForm(root)`；产品那句
+    #    `root.resizable(False, False)` 在第 133 行、**建 UI 之前**。此刻把
+    #    root.resizable 换值改写，Tk 的顶层窗一次都不会被重建。
+    #    ⚠️ 不能等到 patch_main_resize：那个补丁在 mainform 还没进 sys.modules
+    #    时返回 0、要等 sweep 重试 —— 那时产品早就建完 UI 了。
+    try:
+        _install_resizable_redirect(root, log=log)
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("窗口可缩放（Plan C）安装失败 %r" % (e,))
+
+    # 快速 ping（需求38）：把 core.ping_once 从「每台机器 spawn 一个 ping.exe」
+    # 换成 ctypes IcmpSendEcho。批量扫描几百台时，前者会因 CreateProcess
+    # 长时间独占 GIL 而把主线程饿死 1.5~3.0 秒 —— 正是用户反馈的
+    #「批量导入 IP 时卡顿（被当成闪退）」。详见 4.97 节的归因实验表。
+    try:
+        import core as _core_fp
+        install_fast_ping(_core_fp, log=log)
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log("需求38 快速 ping 安装失败 %r" % (e,))
 
     # Apple 风现代主题（用户 2026-10-07 点名 UI 太丑）：
     # 全局 ttk 样式表 + 主窗体轻修饰；子窗体美化在 scale_dialog ⑥ 步逐窗做。
@@ -5341,7 +6191,12 @@ def install(root, log=None, sweep_ms=500, get_scale=None):
         _di._ipscaner_uifix = True
         _tk.Wm.deiconify = _di
 
+    _SWEEP_N = [0]
+
     def sweep():
+        _SWEEP_N[0] += 1
+        if _verbose() and log is not None and (_SWEEP_N[0] <= 40 or _SWEEP_N[0] % 50 == 0):
+            log("sweep#%d 进入（注册表 %d 个窗体）" % (_SWEEP_N[0], len(reg)))
         S = _cur_scale()
         state["S"] = S
         # 版本号兜底：install() 跑在 Tk.__init__ 里，那时 mainform 还没
@@ -5501,6 +6356,8 @@ def install(root, log=None, sweep_ms=500, get_scale=None):
             pass
         # 注：层叠缺陷修复已移入 scale_dialog 内部（见该函数 ⑤ 步）。
         # 放在 sweep 的 scale_dialog 之后无效 —— 下一轮 sweep 会把几何乘回去。
+        if _verbose() and log is not None and _SWEEP_N[0] <= 40:
+            log("sweep#%d 正常退出" % _SWEEP_N[0])
         try:
             root.after(sweep_ms, sweep)
         except Exception:  # noqa: BLE001
